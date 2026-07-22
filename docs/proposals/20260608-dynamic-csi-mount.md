@@ -2,10 +2,12 @@
 title: On-Demand CSI Volume Mount in Sandbox Runtime
 authors:
   - "@jicheng"
+  - "@mowangdk"
+  - "@ZeroCoder-dot"
 reviewers:
   - "@TBD"
 creation-date: 2026-06-08
-last-updated: 2026-06-08
+last-updated: 2026-07-20
 status: provisional
 ---
 
@@ -13,10 +15,10 @@ status: provisional
 
 | Metadata | Details |
 |----------|---------|
-| **Author** | jicheng.sk <jicheng.sk@alibaba-inc.com> |
+| **Authors** | jicheng.sk <jicheng.sk@alibaba-inc.com>, @mowangdk, @ZeroCoder-dot |
 | **Status** | Provisional |
 | **Created** | 2026-06-08 |
-| **Updated** | 2026-06-08 |
+| **Updated** | 2026-07-20 |
 | **Related Components** | sandbox-manager, agent-sandbox-controller, agent-runtime |
 
 ## Table of Contents
@@ -147,6 +149,8 @@ therefore introduces a unified runtime-on-demand-mount design.
 
 ### Architecture Overview
 
+**Component-level call flow** — the following mermaid diagram illustrates the control-plane to data-plane invocation chain and the persistence and restoration paths:
+
 ```mermaid
 flowchart TB
     subgraph CP[Control Plane: sandbox-manager]
@@ -177,6 +181,10 @@ flowchart TB
         I --> L[agent-recovery-cli remount]
     end
 ```
+
+**Container runtime layer** — the diagram below zooms into the sandbox pod and illustrates the sidecar relationship, mount propagation paths, and where the CSI mount occurs:
+
+![On-Demand CSI Mount Architecture](https://raw.githubusercontent.com/openkruise/openkruise.io/b59eace25e84b2c9c2fdb18a4796b27eb7cc2039/static/img/kruiseagents/on-demand-csi-mount-architecture.png)
 
 ### API Design
 
