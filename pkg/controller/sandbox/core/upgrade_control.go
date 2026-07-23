@@ -42,6 +42,7 @@ type UpgradeControl struct {
 	podControl        *PodControl
 	lifecycleHookFunc LifecycleHookFunc
 	initializer       SandboxInitializer
+	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool)
 }
 
 // NewUpgradeControl creates a new UpgradeControl.
@@ -54,6 +55,7 @@ func NewUpgradeControl(
 	podControl *PodControl,
 	lifecycleHookFunc LifecycleHookFunc,
 	initializer SandboxInitializer,
+	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool),
 ) *UpgradeControl {
 	return &UpgradeControl{
 		Client:            cli,
@@ -61,6 +63,7 @@ func NewUpgradeControl(
 		podControl:        podControl,
 		lifecycleHookFunc: lifecycleHookFunc,
 		initializer:       initializer,
+		syncStatusFromPod: syncStatusFromPod,
 	}
 }
 
@@ -187,7 +190,11 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 			if box.Spec.Lifecycle != nil {
 				action = box.Spec.Lifecycle.PostUpgrade
 			}
-			result := r.executeUpgradeAction(ctx, pod, box, action)
+			// Use a copy of box with the latest status so that GetRuntimeURL
+			// resolves the correct PodIP for the PostUpgrade hook.
+			boxForHook := box.DeepCopy()
+			boxForHook.Status = *newStatus
+			result := r.executeUpgradeAction(ctx, pod, boxForHook, action)
 			klog.InfoS("postUpgrade result", "sandbox", klog.KObj(box), "succeeded", result.Succeeded, "message", result.Message)
 			if !result.Succeeded {
 				// Record postUpgrade action failed
@@ -269,16 +276,6 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 		return false, nil
 	}
 
-	if pod.Status.PodIP != "" && pod.Spec.NodeName != "" {
-		newStatus.NodeName = pod.Spec.NodeName
-		newStatus.SandboxIp = pod.Status.PodIP
-		newStatus.PodInfo = agentsv1alpha1.PodInfo{
-			PodIP:    pod.Status.PodIP,
-			NodeName: pod.Spec.NodeName,
-			PodUID:   pod.UID,
-		}
-	}
-
 	// Step 3: Wait for new Pod to be running and ready
 	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
@@ -309,6 +306,8 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 		}
 		return false, nil
 	}
+
+	r.syncStatusFromPod(pod, newStatus, false)
 
 	// Step 4: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
 	if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
