@@ -1,0 +1,41 @@
+# ── OpenKruise CustomFuse PersistentVolume Example ──
+# This PV uses the customfuse CSI driver with JuiceFS as FUSE client.
+#
+# Prerequisites:
+#   1. csi-sidecar-customfuse container in SandboxSet template
+#   2. Redis (metadata engine) + S3-compatible storage (MinIO/OSS/etc.)
+#   3. Secret with JuiceFS credentials (see secret.yaml)
+#
+# Parameters:
+#   source    — JuiceFS META-URL (redis://host:port/db)
+#   fuseType  — FUSE client type (default "customfuse", set to "juicefs")
+#   bucket    — (optional) S3 bucket name
+#   url       — (optional) S3 endpoint URL
+#   path      — (optional) sub-path within the volume
+#   capacity  — (optional) capacity quota (e.g. "100Gi")
+#   otherOpts — (optional) extra FUSE mount options
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: juicefs-imagenet
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  csi:
+    driver: customfuseplugin.csi.alibabacloud.com
+    fsType: juicefs
+    volumeHandle: imagenet-dataset
+    volumeAttributes:
+      source: "redis://redis-cluster.sandbox-system:6379/0"
+      fuseType: "juicefs"
+      bucket: "ml-datasets"
+      # url: "https://s3.amazonaws.com"
+      # path: "/shared"
+      # capacity: "100Gi"
+      # otherOpts: "cache-size=1024"
+    nodePublishSecretRef:
+      name: juicefs-imagenet-secret
+      namespace: sandbox-system

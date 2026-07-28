@@ -33,9 +33,21 @@ var (
 func init() {
 	dynamicDriverList := strings.Split(os.Getenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST), ",")
 	for _, driverName := range dynamicDriverList {
-		initializeProviderFuncs = append(initializeProviderFuncs,
-			func(sp *StorageProvider) {
-				sp.RegisterProvider(driverName, &MountProvider{})
-			})
+		drv := driverName
+		if strings.TrimSpace(drv) == "" {
+			continue
+		}
+		switch {
+		case drv == "customfuseplugin.csi.alibabacloud.com" || strings.Contains(drv, "customfuse"):
+			initializeProviderFuncs = append(initializeProviderFuncs,
+				func(sp *StorageProvider) {
+					sp.RegisterProvider(drv, &CustomFuseMountProvider{})
+				})
+		default:
+			initializeProviderFuncs = append(initializeProviderFuncs,
+				func(sp *StorageProvider) {
+					sp.RegisterProvider(drv, &MountProvider{})
+				})
+		}
 	}
 }

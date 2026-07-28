@@ -90,6 +90,72 @@ func TestInitFunction(t *testing.T) {
 	}
 }
 
+func TestCustomFuseRegistration(t *testing.T) {
+	originalEnvValue := os.Getenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST)
+	defer func() {
+		if originalEnvValue == "" {
+			os.Unsetenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST)
+		} else {
+			os.Setenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST, originalEnvValue)
+		}
+	}()
+	resetInitializeProviderFuncs()
+
+	// Simulate the init() logic as done in TestInitFunction
+	testDriverList := "nasplugin.csi.alibabacloud.com,customfuseplugin.csi.alibabacloud.com,ossplugin.csi.alibabacloud.com"
+	os.Setenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST, testDriverList)
+
+	dynamicDriverList := strings.Split(testDriverList, ",")
+	var tempFuncs []initProviderFunc
+	for _, driverName := range dynamicDriverList {
+		drv := driverName
+		if strings.TrimSpace(drv) == "" {
+			continue
+		}
+		switch {
+		case drv == "customfuseplugin.csi.alibabacloud.com" || strings.Contains(drv, "customfuse"):
+			tempFuncs = append(tempFuncs,
+				func(sp *StorageProvider) {
+					sp.RegisterProvider(drv, &CustomFuseMountProvider{})
+				})
+		default:
+			tempFuncs = append(tempFuncs,
+				func(sp *StorageProvider) {
+					sp.RegisterProvider(drv, &MountProvider{})
+				})
+		}
+	}
+
+	if len(tempFuncs) != 3 {
+		t.Fatalf("expected 3 providers, got %d", len(tempFuncs))
+	}
+
+	// Verify the registered types by calling each function against a fresh registry.
+	sp := NewStorageProvider()
+	for _, fn := range tempFuncs {
+		fn(sp.(*StorageProvider))
+	}
+
+	// customfuse driver → CustomFuseMountProvider
+	customfuseDrv := "customfuseplugin.csi.alibabacloud.com"
+	customProvider, exists := sp.GetProvider(customfuseDrv)
+	if !exists {
+		t.Fatalf("customfuse driver %q not registered", customfuseDrv)
+	}
+	if _, ok := customProvider.(*CustomFuseMountProvider); !ok {
+		t.Errorf("customfuse driver %q expected *CustomFuseMountProvider, got %T", customfuseDrv, customProvider)
+	}
+
+	// non-customfuse drivers → MountProvider
+	nasProvider, exists := sp.GetProvider("nasplugin.csi.alibabacloud.com")
+	if !exists {
+		t.Fatalf("nas driver not registered")
+	}
+	if _, ok := nasProvider.(*MountProvider); !ok {
+		t.Errorf("nas driver expected *MountProvider, got %T", nasProvider)
+	}
+}
+
 // resetInitializeProviderFuncs resets the global initializeProviderFuncs slice for testing
 func resetInitializeProviderFuncs() {
 	initializeProviderFuncs = []initProviderFunc{}
