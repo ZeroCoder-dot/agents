@@ -31,18 +31,20 @@ import (
 
 func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.T) {
 	tests := []struct {
-		name                 string
-		containerMountTarget string
-		volumeAttributes     map[string]string
-		accessModes          []corev1.PersistentVolumeAccessMode
-		secretData           map[string][]byte
-		readOnly             bool
-		expectError          string
-		nilPV                bool
-		nilCSI               bool
-		validateResult       func(*testing.T, *csiapi.NodePublishVolumeRequest)
+		name                  string
+		containerMountTarget  string
+		volumeAttributes      map[string]string
+		accessModes           []corev1.PersistentVolumeAccessMode
+		pvMountOptions        []string
+		secretData            map[string][]byte
+		readOnly              bool
+		expectError           string
+		expectErrorNotContain []string
+		nilPV                 bool
+		nilCSI                bool
+		validateResult        func(*testing.T, *csiapi.NodePublishVolumeRequest)
 	}{
-		// ── 正常路径 ──
+		// Happy path
 		{
 			name:                 "valid JuiceFS mount with source and fuseType",
 			containerMountTarget: "/workspace/data",
@@ -59,7 +61,7 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 				assert.Equal(t, "juicefs", req.VolumeContext["fuseType"])
 				assert.Equal(t, "redis://redis-cluster:6379/0", req.VolumeContext["source"])
 				assert.Equal(t, "test-token", req.Secrets["token"])
-				assert.Contains(t, req.VolumeId, "pv-")
+				assert.Equal(t, "pv-test-handle", req.VolumeId)
 				assert.NotNil(t, req.VolumeCapability)
 			},
 		},
@@ -111,20 +113,20 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 			name:                 "all volumeAttributes passed through unchanged",
 			containerMountTarget: "/mnt",
 			volumeAttributes: map[string]string{
-				"source":        "redis://redis:6379/0",
-				"fuseType":      "juicefs",
-				"bucket":        "my-bucket",
-				"url":           "https://oss.example.com",
-				"path":          "/sub/path",
-				"capacity":      "50Gi",
-				"otherOpts":     "cache-size=1024",
-				"otheropts":     "cache-dir=/ssd",
-				"extra-custom":  "custom-value",
+				"source":       "redis://redis:6379/0",
+				"fuseType":     "juicefs",
+				"bucket":       "my-bucket",
+				"url":          "https://oss.example.com",
+				"path":         "/sub/path",
+				"capacity":     "50Gi",
+				"otherOpts":    "cache-size=1024",
+				"otheropts":    "cache-dir=/ssd",
+				"extra-custom": "custom-value",
 			},
 			secretData: map[string][]byte{
-				"access-key":    []byte("AKID123"),
-				"secret-key":    []byte("SECRET456"),
-				"custom-config": []byte("config-value"),
+				"access_key":    []byte("AKID123"),
+				"secret_key":    []byte("SECRET456"),
+				"custom_config": []byte("config-value"),
 			},
 			expectError: "",
 			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
@@ -132,12 +134,12 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 				assert.Equal(t, "my-bucket", req.VolumeContext["bucket"])
 				assert.Equal(t, "custom-value", req.VolumeContext["extra-custom"])
 				// All secrets are passed through
-				assert.Equal(t, "AKID123", req.Secrets["access-key"])
-				assert.Equal(t, "config-value", req.Secrets["custom-config"])
+				assert.Equal(t, "AKID123", req.Secrets["access_key"])
+				assert.Equal(t, "config-value", req.Secrets["custom_config"])
 			},
 		},
 
-		// ── ReadOnly 推导 ──
+		// ReadOnly
 		{
 			name:                 "readOnly=true is set on request",
 			containerMountTarget: "/mnt/data",
@@ -146,6 +148,8 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 			expectError:          "",
 			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
 				assert.True(t, req.Readonly)
+				assert.Equal(t, csiapi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY,
+					req.VolumeCapability.GetAccessMode().GetMode())
 			},
 		},
 		{
@@ -156,10 +160,50 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 			expectError:          "",
 			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
 				assert.False(t, req.Readonly)
+				assert.Equal(t, csiapi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+					req.VolumeCapability.GetAccessMode().GetMode())
+			},
+		},
+		{
+			name:                 "ReadOnlyMany PV implies read-only even when readOnly=false",
+			containerMountTarget: "/mnt/data",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			accessModes:          []corev1.PersistentVolumeAccessMode{corev1.ReadOnlyMany},
+			expectError:          "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.True(t, req.Readonly)
+				assert.Equal(t, csiapi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY,
+					req.VolumeCapability.GetAccessMode().GetMode())
+			},
+		},
+		{
+			name:                 "ReadWriteOnce PV stays writable when readOnly=false",
+			containerMountTarget: "/mnt/data",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			accessModes:          []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			expectError:          "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.False(t, req.Readonly)
+				assert.Equal(t, csiapi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+					req.VolumeCapability.GetAccessMode().GetMode())
+			},
+		},
+		{
+			name:                 "mixed access modes weaken read-only to writable",
+			containerMountTarget: "/mnt/data",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			accessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadOnlyMany, corev1.ReadWriteOnce,
+			},
+			expectError: "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.False(t, req.Readonly)
+				assert.Equal(t, csiapi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+					req.VolumeCapability.GetAccessMode().GetMode())
 			},
 		},
 
-		// ── 错误路径：结构校验 ──
+		// Error: structural checks
 		{
 			name:                 "nil persistent volume",
 			containerMountTarget: "/mnt",
@@ -168,13 +212,20 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 			nilPV:                true,
 		},
 		{
+			name:                 "nil CSI spec",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			expectError:          "no CSI spec",
+			nilCSI:               true,
+		},
+		{
 			name:                 "empty mount path",
 			containerMountTarget: "",
 			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
 			expectError:          "containerMountTarget is empty",
 		},
 
-		// ── 错误路径：source 必填 ──
+		// Error: source required / shell-safe
 		{
 			name:                 "empty source",
 			containerMountTarget: "/mnt",
@@ -187,8 +238,214 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 			volumeAttributes:     map[string]string{"source": "   "},
 			expectError:          "source is required",
 		},
+		{
+			name:                 "source with semicolon injection",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://host:6379/0; rm -rf /",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "source with command substitution",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://host:6379/0$(whoami)",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "source with embedded space",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://host:6379/0 extra",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "source with trailing whitespace is rejected on the raw value",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://host:6379/0 ",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "source error message masks embedded credentials",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://user:pass@host:6379/0?secret=xyz",
+			},
+			expectError:           "contains invalid characters",
+			expectErrorNotContain: []string{"user:pass", "xyz"},
+		},
+		{
+			name:                 "source error message masks query-string signature",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "https://bucket.s3.amazonaws.com/key?X-Amz-Signature=abc123&X-Amz-Credential=AKID",
+			},
+			expectError:           "contains invalid characters",
+			expectErrorNotContain: []string{"abc123", "AKID"},
+		},
+		{
+			name:                  "source error message masks bare userinfo without scheme",
+			containerMountTarget:  "/mnt",
+			volumeAttributes:      map[string]string{"source": "user:pass@host;evil"},
+			expectError:           "invalid characters",
+			expectErrorNotContain: []string{"pass"},
+		},
+		{
+			name:                 "url error message masks multiple bare userinfo segments",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://host:6379/0",
+				"url":    "user:pass@host;evil",
+			},
+			expectError:           "invalid characters",
+			expectErrorNotContain: []string{"pass"},
+		},
+		{
+			name:                 "source error message masks multiple credential segments",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://user:pass@sub@host:6379/0;touch /tmp/x",
+			},
+			expectError:           "contains invalid characters",
+			expectErrorNotContain: []string{"user:pass@sub", "pass@sub"},
+		},
+		{
+			name:                 "source with embedded credentials is allowed and passes through",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://user:pass@host:6379/0",
+			},
+			expectError: "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.Equal(t, "redis://user:pass@host:6379/0", req.VolumeContext["source"])
+			},
+		},
 
-		// ── 错误路径：fuseType 白名单 ──
+		// Error: url/bucket/path character checks
+		{
+			name:                 "url with whitespace rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "s3://ml-datasets",
+				"url":    "http://host:9000 path",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "url with shell metachar rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "s3://ml-datasets",
+				"url":    "http://host:9000;rm -rf /",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "url error masks embedded credentials",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "s3://ml-datasets",
+				"url":    "http://user:pass@host:9000 path",
+			},
+			expectError:           "contains invalid characters",
+			expectErrorNotContain: []string{"user:pass"},
+		},
+		{
+			name:                 "valid url passes",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "s3://ml-datasets",
+				"url":    "http://minio.sandbox-system:9000",
+			},
+			expectError: "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.Equal(t, "http://minio.sandbox-system:9000", req.VolumeContext["url"])
+			},
+		},
+		{
+			name:                 "bucket with shell metachar rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "s3://ml-datasets",
+				"bucket": "b;rm -rf /",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "path with shell metachar rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://host:6379/0",
+				"path":   "/sub;rm -rf /",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "storageType with shell metachar rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":      "redis://host:6379/0",
+				"storageType": "oss;rm -rf /",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "valid storageType passes through",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":      "redis://host:6379/0",
+				"storageType": "oss",
+			},
+			expectError: "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.Equal(t, "oss", req.VolumeContext["storageType"])
+			},
+		},
+
+		// Error: mountPath shell-safety
+		{
+			name:                 "relative mount path",
+			containerMountTarget: "workspace/data",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			expectError:          "must be absolute",
+		},
+		{
+			name:                 "mount path with semicolon injection",
+			containerMountTarget: "/mnt;rm -rf /",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			expectError:          "safe characters",
+		},
+		{
+			name:                 "mount path with embedded space",
+			containerMountTarget: "/mnt/data dir",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			expectError:          "safe characters",
+		},
+		{
+			name:                 "mount path traverses to parent",
+			containerMountTarget: "/mnt/../etc",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			expectError:          "must not traverse",
+		},
+		{
+			name:                 "mount path with trailing parent segment",
+			containerMountTarget: "/mnt/..",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			expectError:          "must not traverse",
+		},
+		{
+			name:                 "mount path with double dots inside a segment is allowed",
+			containerMountTarget: "/mnt/data..2026",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			expectError:          "",
+		},
+
+		// Error: fuseType allowlist
 		{
 			name:                 "unknown fuseType",
 			containerMountTarget: "/mnt",
@@ -198,8 +455,21 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 			},
 			expectError: "unknown fuseType",
 		},
+		{
+			name:                 "uppercase fuseType normalized to lowercase",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":   "redis://host:6379/0",
+				"fuseType": "JuiceFS",
+			},
+			expectError: "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.Equal(t, "juicefs", req.VolumeContext["fuseType"])
+				assert.Equal(t, "juicefs", req.VolumeCapability.GetMount().FsType)
+			},
+		},
 
-		// ── 错误路径：shell 防注入 ──
+		// Error: shell injection prevention
 		{
 			name:                 "otherOpts contains semicolon",
 			containerMountTarget: "/mnt",
@@ -254,8 +524,36 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 			},
 			expectError: "invalid shell characters",
 		},
+		{
+			name:                 "capacity contains command substitution",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":   "redis://host:6379/0",
+				"capacity": "100Gi$(whoami)",
+			},
+			expectError: "invalid shell characters",
+		},
+		{
+			name:                 "otherOpts contains carriage return",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":    "redis://host:6379/0",
+				"otherOpts": "safe\rvalue",
+			},
+			expectError: "invalid shell characters",
+		},
+		{
+			name:                 "otherOpts error masks key=value credential material",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":    "redis://host:6379/0",
+				"otherOpts": "token=xyz123; rm -rf /",
+			},
+			expectError:           "invalid shell characters",
+			expectErrorNotContain: []string{"xyz123"},
+		},
 
-		// ── 错误路径：凭证分离 ──
+		// Error: credential separation
 		{
 			name:                 "token in volumeAttributes should fail",
 			containerMountTarget: "/mnt",
@@ -269,8 +567,8 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 			name:                 "accessKeyId in volumeAttributes should fail",
 			containerMountTarget: "/mnt",
 			volumeAttributes: map[string]string{
-				"source":       "redis://host:6379/0",
-				"accessKeyId":  "AKID123",
+				"source":      "redis://host:6379/0",
+				"accessKeyId": "AKID123",
 			},
 			expectError: "must not be in volumeAttributes",
 		},
@@ -301,8 +599,321 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 			},
 			expectError: "must not be in volumeAttributes",
 		},
+		{
+			name:                 "access_key in volumeAttributes should fail",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":     "redis://host:6379/0",
+				"access_key": "AKID123",
+			},
+			expectError: "must not be in volumeAttributes",
+		},
+		{
+			name:                 "password in volumeAttributes should fail",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":   "redis://host:6379/0",
+				"password": "p@ssw0rd",
+			},
+			expectError: "must not be in volumeAttributes",
+		},
+		{
+			name:                 "ak in volumeAttributes should fail",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://host:6379/0",
+				"ak":     "AKID123",
+			},
+			expectError: "must not be in volumeAttributes",
+		},
+		{
+			name:                 "sk in volumeAttributes should fail",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://host:6379/0",
+				"sk":     "SECRET456",
+			},
+			expectError: "must not be in volumeAttributes",
+		},
 
-		// ── 边角路径 ──
+		// Error: case-variant keys must not bypass validation. parseOptions
+		// extracts keys from the VolumeContext case-insensitively, so the
+		// provider must validate every case variant of the keys it forwards.
+		{
+			name:                 "uppercase CAPACITY with command substitution rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":   "redis://host:6379/0",
+				"CAPACITY": "100Gi$(whoami)",
+			},
+			expectError: "invalid shell characters",
+		},
+		{
+			name:                 "uppercase OTHEROPTS with semicolon rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":    "redis://host:6379/0",
+				"OTHEROPTS": "opt1; rm -rf /",
+			},
+			expectError: "invalid shell characters",
+		},
+		{
+			name:                 "uppercase MOUNTOPTIONS with backtick rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":       "redis://host:6379/0",
+				"MOUNTOPTIONS": "opt=`id`",
+			},
+			expectError: "invalid shell characters",
+		},
+		{
+			name:                 "uppercase SOURCE with invalid characters rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"SOURCE": "redis://host:6379/0; rm -rf /",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "uppercase URL with whitespace rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "s3://ml-datasets",
+				"URL":    "http://host:9000 path",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "uppercase BUCKET with shell metachar rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "s3://ml-datasets",
+				"BUCKET": "b;rm -rf /",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "uppercase PATH with shell metachar rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://host:6379/0",
+				"PATH":   "/sub;rm -rf /",
+			},
+			expectError: "contains invalid characters",
+		},
+		{
+			name:                 "uppercase FUSETYPE unknown value rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":   "redis://host:6379/0",
+				"FUSETYPE": "unknown-fuse-client",
+			},
+			expectError: "unknown fuseType",
+		},
+		{
+			name:                 "uppercase TOKEN in volumeAttributes rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://host:6379/0",
+				"TOKEN":  "secret-token-in-wrong-place",
+			},
+			expectError: "must not be in volumeAttributes",
+		},
+		{
+			name:                 "mixed-case ACCESSKEYID in volumeAttributes rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":      "redis://host:6379/0",
+				"accessKeyId": "AKID123",
+			},
+			expectError: "must not be in volumeAttributes",
+		},
+		{
+			name:                 "uppercase SOURCE variant alone is a valid source",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"SOURCE": "redis://host:6379/0",
+			},
+			expectError: "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				// Keys pass through unchanged; parseOptions extracts them
+				// case-insensitively downstream.
+				assert.Equal(t, "redis://host:6379/0", req.VolumeContext["SOURCE"])
+			},
+		},
+		{
+			name:                 "whitespace-only uppercase SOURCE counts as missing",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"SOURCE": "   ",
+			},
+			expectError: "source is required",
+		},
+		{
+			name:                 "empty SOURCE variant next to valid source is ignored",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source": "redis://host:6379/0",
+				"SOURCE": "",
+			},
+			expectError: "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.Equal(t, "redis://host:6379/0", req.VolumeContext["source"])
+			},
+		},
+		{
+			name:                 "uppercase FuseType normalized to canonical lowercase key",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":   "redis://host:6379/0",
+				"FuseType": "JuiceFS",
+			},
+			expectError: "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.Equal(t, "juicefs", req.VolumeContext["fuseType"])
+				assert.Equal(t, "juicefs", req.VolumeCapability.GetMount().FsType)
+				assert.NotContains(t, req.VolumeContext, "FuseType")
+				assert.Len(t, req.VolumeContext, 2)
+			},
+		},
+		{
+			name:                 "duplicate fuseType case variants collapsed to one canonical key",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":   "redis://host:6379/0",
+				"fuseType": "jindo",
+				"FuseType": "JINDO",
+			},
+			expectError: "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.Equal(t, "jindo", req.VolumeContext["fuseType"])
+				assert.Equal(t, "jindo", req.VolumeCapability.GetMount().FsType)
+				assert.NotContains(t, req.VolumeContext, "FuseType")
+				assert.Len(t, req.VolumeContext, 2)
+			},
+		},
+
+		// Error: secret key env-identifier validation
+		{
+			name:                 "secret key with dash rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"access-key": []byte("AKID123"),
+			},
+			expectError: "not a valid environment variable name",
+		},
+		{
+			name:                 "secret key starting with digit rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"1token": []byte("value"),
+			},
+			expectError: "not a valid environment variable name",
+		},
+		{
+			name:                 "secret key with underscore is valid",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"access_key": []byte("AKID123"),
+			},
+			expectError: "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.Equal(t, "AKID123", req.Secrets["access_key"])
+			},
+		},
+		{
+			name:                 "secret value with newline rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"access_key": []byte("line1\nline2"),
+			},
+			expectError: "must not contain a newline",
+		},
+		{
+			name:                 "secret value with carriage return rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"access_key": []byte("line1\rline2"),
+			},
+			expectError: "must not contain a newline",
+		},
+
+		// Error: dangerous environment keys in Secret (exported as env vars
+		// by mount-proxy; bash would source BASH_ENV at startup)
+		{
+			name:                 "secret key BASH_ENV rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"BASH_ENV": []byte("/run/csi/mount-root/evil.sh"),
+			},
+			expectError: "not allowed",
+		},
+		{
+			name:                 "secret key LD_PRELOAD rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"LD_PRELOAD": []byte("/tmp/x.so"),
+			},
+			expectError: "not allowed",
+		},
+		{
+			name:                 "secret key IFS rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"IFS": []byte("x"),
+			},
+			expectError: "not allowed",
+		},
+
+		// Error: reserved provider-injected keys in Secret (mount-proxy exports
+		// Secret entries verbatim and the last duplicate env wins, so these
+		// would override the validated mount source / read-only / target)
+		{
+			name:                 "secret key source rejected as reserved",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"source": []byte("redis://evil:6379/0"),
+			},
+			expectError: "reserved",
+		},
+		{
+			name:                 "secret key readOnly rejected as reserved",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"readOnly": []byte("false"),
+			},
+			expectError: "reserved",
+		},
+		{
+			name:                 "secret key mountpoint rejected as reserved",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"mountpoint": []byte("/etc/hosts"),
+			},
+			expectError: "reserved",
+		},
+		{
+			name:                 "secret key otherOpts rejected as reserved",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			secretData: map[string][]byte{
+				"otherOpts": []byte("cache-size=1"),
+			},
+			expectError: "reserved",
+		},
+
+		// Edge cases
 		{
 			name:                 "agent-identity mode with nil secret",
 			containerMountTarget: "/mnt",
@@ -363,6 +974,66 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 			},
 			expectError: "",
 		},
+
+		// Error: reserved provider keys smuggled inside the option-list
+		// fields (the entrypoint appends them to the -o string after the
+		// provider-composed options, so they would override the validated
+		// url/source/bucket semantics)
+		{
+			name:                 "otherOpts url override rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":    "redis://host:6379/0",
+				"otherOpts": "url=http://attacker:9000",
+			},
+			expectError: "reserved for provider-injected",
+		},
+		{
+			name:                 "otherOpts source override rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":    "redis://host:6379/0",
+				"otherOpts": "cache-size=1024,source=redis://evil:6379/0",
+			},
+			expectError: "reserved for provider-injected",
+		},
+		{
+			name:                 "otherOpts readOnly override rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":    "redis://host:6379/0",
+				"otherOpts": "readOnly=false",
+			},
+			expectError: "reserved for provider-injected",
+		},
+		{
+			name:                 "volumeAttributes mountOptions url override rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":       "redis://host:6379/0",
+				"mountOptions": "url=http://attacker:9000",
+			},
+			expectError: "reserved for provider-injected",
+		},
+		{
+			name:                 "capacity option list is not checked",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":   "redis://host:6379/0",
+				"capacity": "url=x",
+			},
+			expectError: "",
+		},
+		{
+			name:                 "reserved override error masks value",
+			containerMountTarget: "/mnt",
+			volumeAttributes: map[string]string{
+				"source":    "redis://host:6379/0",
+				"otherOpts": "url=http://attacker:9000",
+			},
+			expectError:           "reserved for provider-injected",
+			expectErrorNotContain: []string{"attacker"},
+		},
 		{
 			name:                 "empty otherOpts and mountOptions pass validation",
 			containerMountTarget: "/mnt",
@@ -372,6 +1043,127 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 				"mountOptions": "",
 			},
 			expectError: "",
+		},
+
+		// Error: PV.Spec.MountOptions -> MountFlags mapping
+		{
+			name:                 "PV mountOptions mapped to VolumeCapability MountFlags",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"cache-size=1024", "no-update"},
+			expectError:          "",
+			validateResult: func(t *testing.T, req *csiapi.NodePublishVolumeRequest) {
+				assert.Equal(t, []string{"cache-size=1024", "no-update"},
+					req.VolumeCapability.GetMount().MountFlags)
+			},
+		},
+		{
+			name:                 "PV mountOptions with shell metachar rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"opt1; rm -rf /"},
+			expectError:          "invalid shell characters",
+		},
+		{
+			name:                 "empty PV mountOptions passes validation",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{},
+			expectError:          "",
+		},
+
+		// Error: dangerous environment keys in mountOptions (exported as env
+		// vars by mount-proxy; bash/glibc would act on them)
+		{
+			name:                 "mountOptions BASH_ENV rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"BASH_ENV=/tmp/x.sh"},
+			expectError:          "not allowed",
+		},
+		{
+			name:                 "mountOptions LD_PRELOAD rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"LD_PRELOAD=/tmp/x.so"},
+			expectError:          "not allowed",
+		},
+		{
+			name:                 "mountOptions PATH rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"PATH=/tmp"},
+			expectError:          "not allowed",
+		},
+		{
+			name:                 "bare dangerous key rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"IFS"},
+			expectError:          "not allowed",
+		},
+		{
+			name:                 "hyphenated mount option still allowed",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"cache-size=1024", "no-update"},
+			expectError:          "",
+		},
+		{
+			name:                 "lowercase dangerous key still allowed",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"bash_env=/tmp/x.sh"},
+			expectError:          "",
+		},
+		{
+			name:                  "blocked mount option error masks value",
+			containerMountTarget:  "/mnt",
+			volumeAttributes:      map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:        []string{"BASH_ENV=/tmp/x.sh"},
+			expectError:           "not allowed",
+			expectErrorNotContain: []string{"/tmp/x.sh"},
+		},
+
+		// Error: reserved provider keys in mountOptions (exported as env vars
+		// by mount-proxy; on duplicate keys the last occurrence wins, so they
+		// would override the validated source/url/bucket semantics and can
+		// redirect credentials to an attacker endpoint)
+		{
+			name:                 "mountOptions url override rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"url=http://attacker:9000"},
+			expectError:          "reserved for provider-injected",
+		},
+		{
+			name:                 "mountOptions source override rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"source=redis://evil:6379/0"},
+			expectError:          "reserved for provider-injected",
+		},
+		{
+			name:                 "mountOptions otherOpts override rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"otherOpts=debug"},
+			expectError:          "reserved for provider-injected",
+		},
+		{
+			name:                 "mountOptions readOnly override rejected",
+			containerMountTarget: "/mnt",
+			volumeAttributes:     map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:       []string{"readOnly=false"},
+			expectError:          "reserved for provider-injected",
+		},
+		{
+			name:                  "reserved override error masks value",
+			containerMountTarget:  "/mnt",
+			volumeAttributes:      map[string]string{"source": "redis://host:6379/0"},
+			pvMountOptions:        []string{"url=http://attacker:9000"},
+			expectError:           "reserved for provider-injected",
+			expectErrorNotContain: []string{"attacker"},
 		},
 	}
 
@@ -390,7 +1182,8 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 				pv = &corev1.PersistentVolume{
 					ObjectMeta: metav1.ObjectMeta{Name: "pv-test"},
 					Spec: corev1.PersistentVolumeSpec{
-						AccessModes: tt.accessModes,
+						AccessModes:  tt.accessModes,
+						MountOptions: tt.pvMountOptions,
 					},
 				}
 				if csiSpec != nil {
@@ -419,6 +1212,9 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
+				for _, s := range tt.expectErrorNotContain {
+					assert.NotContains(t, err.Error(), s)
+				}
 			} else {
 				require.NoError(t, err)
 				assert.NotNil(t, result)
@@ -430,30 +1226,42 @@ func TestCustomFuseMountProvider_GenerateCSINodePublishVolumeRequest(t *testing.
 	}
 }
 
-func TestCustomFuseMountProvider_VolumeIdUniqueness(t *testing.T) {
-	provider := &CustomFuseMountProvider{}
-	pv := &corev1.PersistentVolume{
-		ObjectMeta: metav1.ObjectMeta{Name: "pv-unique"},
-		Spec: corev1.PersistentVolumeSpec{
-			PersistentVolumeSource: corev1.PersistentVolumeSource{
-				CSI: &corev1.CSIPersistentVolumeSource{
-					Driver:           "customfuseplugin.csi.alibabacloud.com",
-					VolumeHandle:     "pv-unique-handle",
-					VolumeAttributes: map[string]string{"source": "redis://host:6379/0"},
-				},
-			},
-		},
+func TestCustomFuseMountProvider_VolumeIdStability(t *testing.T) {
+	tests := []struct {
+		name         string
+		volumeHandle string
+		want         string
+	}{
+		{"uses VolumeHandle when set", "pv-unique-handle", "pv-unique-handle"},
+		{"falls back to PV name when VolumeHandle is empty", "", "pv-unique"},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &CustomFuseMountProvider{}
+			pv := &corev1.PersistentVolume{
+				ObjectMeta: metav1.ObjectMeta{Name: "pv-unique"},
+				Spec: corev1.PersistentVolumeSpec{
+					PersistentVolumeSource: corev1.PersistentVolumeSource{
+						CSI: &corev1.CSIPersistentVolumeSource{
+							Driver:           "customfuseplugin.csi.alibabacloud.com",
+							VolumeHandle:     tt.volumeHandle,
+							VolumeAttributes: map[string]string{"source": "redis://host:6379/0"},
+						},
+					},
+				},
+			}
 
-	// Generate two requests and verify VolumeIds differ (random suffix).
-	req1, err1 := provider.GenerateCSINodePublishVolumeRequest(context.Background(), "/mnt", pv, false, nil)
-	require.NoError(t, err1)
-	req2, err2 := provider.GenerateCSINodePublishVolumeRequest(context.Background(), "/mnt", pv, false, nil)
-	require.NoError(t, err2)
+			// Generate two requests and verify the VolumeId is identical,
+			// because the CSI node plugin keys mount state by it.
+			req1, err1 := provider.GenerateCSINodePublishVolumeRequest(context.Background(), "/mnt", pv, false, nil)
+			require.NoError(t, err1)
+			req2, err2 := provider.GenerateCSINodePublishVolumeRequest(context.Background(), "/mnt", pv, false, nil)
+			require.NoError(t, err2)
 
-	assert.NotEqual(t, req1.VolumeId, req2.VolumeId, "consecutive mounts should generate unique VolumeIds")
-	assert.Contains(t, req1.VolumeId, "pv-unique")
-	assert.Contains(t, req2.VolumeId, "pv-unique")
+			assert.Equal(t, tt.want, req1.VolumeId, "VolumeId must be stable per volume")
+			assert.Equal(t, req1.VolumeId, req2.VolumeId, "consecutive mounts must yield the same VolumeId")
+		})
+	}
 }
 
 func TestCustomFuseMountProvider_PassthroughNonCustomfuseKeys(t *testing.T) {
@@ -465,8 +1273,8 @@ func TestCustomFuseMountProvider_PassthroughNonCustomfuseKeys(t *testing.T) {
 		Spec: corev1.PersistentVolumeSpec{
 			PersistentVolumeSource: corev1.PersistentVolumeSource{
 				CSI: &corev1.CSIPersistentVolumeSource{
-					Driver:           "customfuseplugin.csi.alibabacloud.com",
-					VolumeHandle:     "pv-custom-handle",
+					Driver:       "customfuseplugin.csi.alibabacloud.com",
+					VolumeHandle: "pv-custom-handle",
 					VolumeAttributes: map[string]string{
 						"source":      "redis://host:6379/0",
 						"custom-key1": "value1",
@@ -481,6 +1289,36 @@ func TestCustomFuseMountProvider_PassthroughNonCustomfuseKeys(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "value1", req.VolumeContext["custom-key1"])
 	assert.Equal(t, "value2", req.VolumeContext["custom-key2"])
+}
+
+// TestCustomFuseMountProvider_DoesNotMutatePV verifies the AGENTS.md
+// invariant that provider validation and request generation never modify the
+// input PersistentVolume: the fuseType default must land in the cloned
+// VolumeContext, never in the original PV's volume attributes.
+func TestCustomFuseMountProvider_DoesNotMutatePV(t *testing.T) {
+	provider := &CustomFuseMountProvider{}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "pv-mutation"},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{
+					Driver:       "customfuseplugin.csi.alibabacloud.com",
+					VolumeHandle: "pv-mutation-handle",
+					VolumeAttributes: map[string]string{
+						"source": "redis://host:6379/0",
+					},
+				},
+			},
+		},
+	}
+
+	req, err := provider.GenerateCSINodePublishVolumeRequest(context.Background(), "/mnt", pv, false, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "customfuse", req.VolumeContext["fuseType"])
+
+	assert.Len(t, pv.Spec.CSI.VolumeAttributes, 1)
+	assert.NotContains(t, pv.Spec.CSI.VolumeAttributes, "fuseType")
+	assert.Equal(t, "redis://host:6379/0", pv.Spec.CSI.VolumeAttributes["source"])
 }
 
 // TestCustomFuseMountProvider_ProtoRoundtrip verifies that the generated
@@ -512,8 +1350,8 @@ func TestCustomFuseMountProvider_ProtoRoundtrip(t *testing.T) {
 	secret := &corev1.Secret{
 		Data: map[string][]byte{
 			"token":      []byte("test-token-value"),
-			"access-key": []byte("AKID-TEST"),
-			"secret-key": []byte("SECRET-TEST"),
+			"access_key": []byte("AKID-TEST"),
+			"secret_key": []byte("SECRET-TEST"),
 		},
 	}
 
@@ -548,6 +1386,6 @@ func TestCustomFuseMountProvider_ProtoRoundtrip(t *testing.T) {
 	assert.Equal(t, original.VolumeContext["capacity"], restored.VolumeContext["capacity"])
 	assert.Equal(t, original.VolumeContext["otherOpts"], restored.VolumeContext["otherOpts"])
 	assert.Equal(t, original.Secrets["token"], restored.Secrets["token"])
-	assert.Equal(t, original.Secrets["access-key"], restored.Secrets["access-key"])
-	assert.Equal(t, original.Secrets["secret-key"], restored.Secrets["secret-key"])
+	assert.Equal(t, original.Secrets["access_key"], restored.Secrets["access_key"])
+	assert.Equal(t, original.Secrets["secret_key"], restored.Secrets["secret_key"])
 }

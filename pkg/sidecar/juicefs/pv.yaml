@@ -1,4 +1,4 @@
-# ── OpenKruise CustomFuse PersistentVolume Example ──
+# OpenKruise CustomFuse PersistentVolume Example
 # This PV uses the customfuse CSI driver with JuiceFS as FUSE client.
 #
 # Prerequisites:
@@ -7,13 +7,18 @@
 #   3. Secret with JuiceFS credentials (see secret.yaml)
 #
 # Parameters:
-#   source    — JuiceFS META-URL (redis://host:port/db)
-#   fuseType  — FUSE client type (default "customfuse", set to "juicefs")
-#   bucket    — (optional) S3 bucket name
-#   url       — (optional) S3 endpoint URL
-#   path      — (optional) sub-path within the volume
-#   capacity  — (optional) capacity quota (e.g. "100Gi")
-#   otherOpts — (optional) extra FUSE mount options
+#   source       — JuiceFS META-URL (redis://host:port/db)
+#   fuseType     — FUSE client type (default "customfuse", set to "juicefs")
+#   bucket       — (optional) S3 bucket name
+#   url          — (optional) S3 endpoint URL
+#   storageType  — (optional) object storage type (default "s3"; "oss", "minio", ...)
+#   path         — (optional) sub-path mounted as the volume root (--subdir)
+#   capacity     — (optional) capacity quota (e.g. "100Gi")
+#   otherOpts    — (optional) extra FUSE mount options
+#
+# Note: pv.spec.mountOptions is not consumed by the entrypoint (each entry
+# would become a separate env var that the script does not read); put extra
+# mount options in volumeAttributes.otherOpts instead.
 apiVersion: v1
 kind: PersistentVolume
 metadata:

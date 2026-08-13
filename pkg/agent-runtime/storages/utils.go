@@ -34,16 +34,26 @@ func generateRandomString(length int) string {
 	return string(b)
 }
 
+// IsPureReadOnly reports whether the volume is read-only by its access
+// modes. Any writable mode (ReadWriteOnce/Many/OncePod) makes the volume
+// writable; otherwise a non-empty mode list is treated as read-only so that
+// an unknown future mode defaults to the conservative direction instead of
+// silently weakening to writable. An empty mode list (no declaration) stays
+// writable, matching the mount request's own readOnly flag as the only
+// signal.
 func IsPureReadOnly(accessModes []corev1.PersistentVolumeAccessMode) bool {
+	if len(accessModes) == 0 {
+		return false
+	}
 	for _, mode := range accessModes {
-		if mode == corev1.ReadWriteOnce || mode == corev1.ReadWriteMany || mode == corev1.ReadWriteOncePod {
+		switch mode {
+		case corev1.ReadWriteOnce, corev1.ReadWriteMany, corev1.ReadWriteOncePod:
 			return false
+		case corev1.ReadOnlyMany:
+			// known read-only mode
+		default:
+			// Unknown mode: keep the conservative read-only default.
 		}
 	}
-	for _, mode := range accessModes {
-		if mode == corev1.ReadOnlyMany {
-			return true
-		}
-	}
-	return false
+	return true
 }

@@ -1,0 +1,51 @@
+# OpenKruise CustomFuse s3fs PersistentVolume Example
+# This PV uses the customfuse CSI driver with s3fs as FUSE client,
+# mounting an S3 bucket directly (no metadata engine, no format step).
+#
+# Prerequisites:
+#   1. csi-sidecar container with the s3fs binary in the SandboxSet template
+#   2. S3-compatible object storage reachable from the sandbox
+#      (MinIO in-cluster, Alibaba OSS, Ceph RGW, ...)
+#   3. Secret with s3fs credentials (see secret.yaml)
+#
+# Parameters:
+#   source    — S3 bucket ("s3://ml-datasets" or bare "ml-datasets")
+#   fuseType  — FUSE client type (must be "s3fs")
+#   url       — (optional) S3 endpoint URL, required for MinIO/OSS/RGW
+#   otherOpts — (optional) extra s3fs mount options
+#
+# Note: s3fs has no capacity-quota concept, so the capacity below is
+# informational only (unlike the JuiceFS entrypoint's quota support).
+# s3fs also provides no file locking and only weak cross-node consistency,
+# so ReadWriteMany is best-effort.
+#
+# pv.spec.mountOptions is not consumed by the entrypoint (each entry would
+# become a separate env var that the script does not read); put extra mount
+# options in volumeAttributes.otherOpts instead. Keys that bash or glibc
+# act on (BASH_ENV, LD_PRELOAD, PATH, ...) are rejected by the provider.
+#
+# otherOpts must not contain shell metacharacters, and debug options
+# (curldbg, dbg, dbglevel, debug, verbose) are rejected by the entrypoint:
+# they would print signed request headers into logs.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: s3fs-dataset
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  csi:
+    driver: customfuseplugin.csi.alibabacloud.com
+    fsType: s3fs
+    volumeHandle: s3fs-dataset
+    volumeAttributes:
+      source: "s3://ml-datasets"
+      fuseType: "s3fs"
+      url: "http://minio.sandbox-system:9000"
+      # otherOpts: "multipart_size=64,multipart_chunksize=32"
+    nodePublishSecretRef:
+      name: s3fs-secret
+      namespace: sandbox-system
