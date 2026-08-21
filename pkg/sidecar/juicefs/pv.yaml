@@ -1,0 +1,91 @@
+# OpenKruise CustomFuse PersistentVolume Example
+# This PV uses the customfuse CSI driver with JuiceFS as FUSE client.
+#
+# Prerequisites:
+#   1. csi-sidecar-customfuse container in SandboxSet template
+#   2. Redis (metadata engine) + S3-compatible storage (MinIO/OSS/etc.);
+#      the ml-datasets bucket below must already exist (format fails otherwise) and
+#      the Redis database number must match the actual deployment
+#   3. Secret with JuiceFS credentials (see secret.yaml)
+#   4. TODO: replace the example hosts, bucket and db with your environment
+#
+# Production note: run Redis with AOF persistence enabled
+# (--appendonly yes). Without it JuiceFS logs a warning and Redis
+# metadata can be lost if Redis is not shut down properly.
+#
+# Parameters:
+#   source       — JuiceFS META-URL (redis://host:port/db). Never embed
+#                  credentials here (redis://user:pass@host is only masked
+#                  in logs, not rejected): credentials belong in the Secret.
+#   fuseType     — FUSE client type. Only when neither fuseType nor CSI
+#                  fsType is set does the provider inject the "customfuse"
+#                  default; this example sets both to "juicefs" explicitly
+#                  because it mounts with the JuiceFS client.
+#                  The file system name itself comes from the Secret key
+#                  "name" (defaults to "myjfs"), matching the official
+#                  JuiceFS CSI driver convention.
+#   bucket       — S3 bucket name. Required when the Secret carries an
+#                  AK/SK pair (the format step needs it); omittable in
+#                  token-only mode, which skips format entirely.
+#   url          — (optional) S3 endpoint URL; required for self-hosted
+#                  object storage (MinIO/OSS/Ceph RGW), omit only for AWS S3.
+#                  Must include the scheme (http:// or https:// host:port);
+#                  never embed credentials in it.
+#   storageType  — (optional) object storage type (default "s3"; "oss", ...).
+#                  "minio" is accepted and mapped to "s3" (S3-compatible).
+#   path         — (optional) sub-path mounted as the volume root (--subdir).
+#                  Unlike the official JuiceFS CSI driver's mountOptions
+#                  subdir= form, the sub-directory is NOT auto-created here:
+#                  it must already exist in the file system (mount fails
+#                  otherwise). Use this field instead of putting subdir=
+#                  into otherOpts — subdir is a client flag, not a FUSE
+#                  option, so -o subdir=... would be rejected or ignored.
+#   capacity     — (optional) capacity quota (e.g. "100Gi"); the numeric
+#                  part is bounded to 15 digits. Independent of
+#                  spec.capacity.storage above, which is informational
+#                  only — the quota is enforced via `juicefs quota set`
+#   otherOpts    — (optional) extra FUSE mount options, space or comma
+#                  separated; option values must not contain spaces
+#
+# Note: pv.spec.mountOptions is not consumed by the entrypoint (each entry
+# would become a separate env var that the script does not read); put extra
+# mount options in volumeAttributes.otherOpts instead. The entries are
+# still validated by the provider (dangerous or reserved keys are
+# rejected), so debug-like options fail at claim time rather than being
+# silently ignored.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: juicefs-imagenet
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  # volumeMode/storageClassName match the On-Demand Volume Mounting doc
+  # example; the empty storageClassName keeps a default StorageClass from
+  # taking over semantics for this manually created PV.
+  volumeMode: Filesystem
+  storageClassName: ""
+  csi:
+    driver: customfuseplugin.csi.openkruise.io
+    fsType: juicefs
+    # volumeHandle must be unique cluster-wide; use the PV name itself so
+    # collisions surface as obvious duplicate PV names.
+    volumeHandle: juicefs-imagenet
+    volumeAttributes:
+      source: "redis://redis-cluster.sandbox-system:6379/0"
+      fuseType: "juicefs"
+      bucket: "ml-datasets"
+      # url is required for self-hosted object storage (MinIO/OSS/RGW);
+      # delete the line when the bucket lives in AWS S3 itself.
+      url: "http://minio.sandbox-system:9000"
+      # path: "/shared"
+      # capacity: "100Gi"
+      # otherOpts: "cache-size=1024"
+    nodePublishSecretRef:
+      name: juicefs-imagenet-secret
+      # The provider reads the Secret from this namespace; RBAC must grant
+      # it access here even though the PV itself is cluster-scoped.
+      namespace: sandbox-system
