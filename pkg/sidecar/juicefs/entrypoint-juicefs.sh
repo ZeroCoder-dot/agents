@@ -187,13 +187,15 @@ if [ ${#FORMAT_ARGS[@]} -gt 0 ]; then
         done
     fi
     echo "Formatting volume: $(mask_source "$source") name=$_JFS_NAME storage=$_storageType bucket=$bucket"
-    # Re-running format on an existing volume fails. Treat that as
-    # "already formatted" only when the error says so or the volume is
-    # actually reachable, so a genuine format failure (bad credentials,
-    # bad bucket) stays fatal instead of being masked by the fallback.
-    # Bad AK/SK cannot hide here: mounting authenticates via token only,
-    # and the AK/SK pair participates solely in format — a volume that
-    # exists implies the format failure was "already formatted", not a
+    # juicefs format 1.4.1 replays the configuration idempotently on an
+    # existing volume (verified empirically: a re-run succeeds), so the
+    # normal path never fails here. The fallback below still guards the
+    # failure case: treat it as "already formatted" only when the error
+    # says so or the volume is actually reachable, so a genuine format
+    # failure (bad credentials, bad bucket) stays fatal instead of being
+    # masked. Bad AK/SK cannot hide here: mounting authenticates via token
+    # only, and the AK/SK pair participates solely in format — a volume
+    # that exists implies the format failure was "already formatted", not a
     # credential error. The error-text check comes first because
     # `juicefs status` may itself need authentication and fail on a
     # perfectly healthy existing volume.

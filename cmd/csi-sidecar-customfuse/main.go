@@ -111,10 +111,13 @@ func run() error {
 	}
 
 	// GracefulStop waits for in-flight RPCs to finish; bound the wait so
-	// a stuck RPC cannot stall container shutdown. The 8s bound leaves
-	// headroom below the supervisor's 10-second SIGKILL escalation (the
-	// two timers run in parallel from the same TERM, so this process
-	// normally exits on its own terms first).
+	// a stuck RPC cannot stall container shutdown. The shutdown timers
+	// nest: this 8s bound sits below start.sh's 10-second SIGKILL
+	// escalation, which sits below the pod's terminationGracePeriodSeconds
+	// (the SandboxSet template must set it to >= 30s — a shorter window
+	// would let kubelet SIGKILL cut the flush short; see the pv.yaml
+	// prerequisites). All timers run from the same TERM, so this process
+	// normally exits on its own terms first.
 	stopped := make(chan struct{})
 	go func() {
 		srv.GracefulStop()

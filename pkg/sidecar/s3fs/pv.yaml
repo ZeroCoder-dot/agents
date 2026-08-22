@@ -4,27 +4,36 @@
 #
 # Prerequisites:
 #   1. csi-sidecar container with the s3fs binary in the SandboxSet template
+#      (set terminationGracePeriodSeconds >= 30 there: the internal
+#      supervisor escalation timer assumes that window)
 #   2. S3-compatible object storage reachable from the sandbox
 #      (MinIO in-cluster, Alibaba OSS, Ceph RGW, COS, OBS, ...) —
 #      switching backends only changes url + the Secret credentials;
 #      the ml-datasets bucket must already exist (mount fails otherwise)
 #   3. Secret with s3fs credentials (see secret.yaml)
-#   4. TODO: replace the example bucket and hosts with your environment
+#   4. TODO: replace the example bucket and hosts with your environment,
+#      and the Secret credentials (see secret.yaml)
+#   5. The SandboxClaim's mountPath must be an empty directory in the
+#      sandbox container (On-Demand Volume Mounting doc requirement)
 #
 # Parameters:
 #   source    — S3 bucket ("s3://ml-datasets" or bare "ml-datasets")
 #   fuseType  — FUSE client type (optional). When set it must match CSI
 #               fsType below (a mismatch is rejected by the provider);
-#               when omitted, fsType is used.
+#               when omitted, fsType is used. Both sources pass the
+#               fuseType allowlist.
 #   url       — (optional) S3 endpoint URL, required for MinIO/OSS/RGW,
-#               omit for AWS S3 (path-style requests are not forced there);
-#               must include the scheme (http:// or https:// host:port)
-#               and must not embed credentials. Use https:// outside the
-#               cluster-internal network.
+#               omit for AWS S3 (except AWS regions that require an
+#               explicit endpoint, e.g. China regions; path-style requests
+#               are not forced there); must include the scheme (http:// or
+#               https:// host:port) and must not embed credentials. Use
+#               https:// outside the cluster-internal network.
 #   path      — not supported: s3fs mounts only the bucket root (setting
-#               it is rejected by the entrypoint)
-#   otherOpts — (optional) extra s3fs mount options, space or comma
-#               separated; option values must not contain spaces
+#               it is rejected by the entrypoint; a subdir= entry in
+#               otherOpts is rejected by the provider at claim time)
+#   otherOpts — (optional) extra s3fs mount options, space, comma or tab
+#               separated; option values must not contain spaces, commas
+#               or tabs
 #
 # Note: s3fs has no capacity-quota concept, so the capacity below is
 # informational only (unlike the JuiceFS entrypoint's quota support).
@@ -37,7 +46,9 @@
 # pv.spec.mountOptions is not consumed by the entrypoint (each entry would
 # become a separate env var that the script does not read); put extra mount
 # options in volumeAttributes.otherOpts instead. Keys that bash or glibc
-# act on (BASH_ENV, LD_PRELOAD, PATH, ...) are rejected by the provider.
+# act on (BASH_ENV, LD_PRELOAD, PATH, ...) are rejected by the provider at
+# claim time; debug and background options are rejected by the entrypoint
+# at mount time.
 #
 # otherOpts must not contain shell metacharacters; debug options
 # (curldbg, dbg, dbglevel, debug, verbose — they would print signed
